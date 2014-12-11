@@ -30,14 +30,12 @@ class RRQR extends RowPartitionedSolver with Logging with Serializable {
       } else {
         // pvt : pivot indices
         val tmpR = new TSQR().qrR(RowPartitionedMatrix.fromArray(sc.parallelize(Seq(part.mat.data)), Seq.fill(1)(part.mat.rows), part.mat.cols))
-        val tmpQRP = qrp(tmpR)
-        val getPvt = tmpQRP.pivotIndices.take(b)
-        val getCols = getPvt.map { idx =>
+        val getPvt = qrp(tmpR).pivotIndices.take(b)
+        RowPartition(getPvt.map { idx =>
           part.mat(::, idx).toDenseMatrix
         }.reduceLeft { (col1, col2) =>
           DenseMatrix.vertcat(col1, col2)
-        }
-        RowPartition(getCols)
+        })
       }
     }
     
@@ -48,23 +46,6 @@ class RRQR extends RowPartitionedSolver with Logging with Serializable {
 
       val g1 = roundN.zipWithIndex.filter(_._2 % 2  == 0)
       val g2 = roundN.zipWithIndex.filter(_._2 % 2  == 1)
-      
-      def comb(aiter: Iterator[(RowPartition, Long)],
-               biter: Iterator[(RowPartition, Long)])
-              :Iterator[DenseMatrix[Double]] = {
-        var res = List[DenseMatrix[Double]]()
-        while (aiter.hasNext && biter.hasNext) {
-          val x = DenseMatrix.vertcat(aiter.next._1.mat, biter.next._1.mat)
-          res ::= x
-        }
-        if (aiter.hasNext) {
-          res ::= aiter.next._1.mat
-        } else if (biter.hasNext) {
-          res ::= biter.next._1.mat
-        }
-        res.iterator
-      }
-
       var preCal = g1.zipPartitions(g2)(comb)
 
       roundN = preCal.map { part =>
@@ -98,8 +79,24 @@ class RRQR extends RowPartitionedSolver with Logging with Serializable {
     }
       
   }
+
+  private def comb(aiter: Iterator[(RowPartition, Long)],
+           biter: Iterator[(RowPartition, Long)])
+          :Iterator[DenseMatrix[Double]] = {
+    var res = List[DenseMatrix[Double]]()
+    while (aiter.hasNext && biter.hasNext) {
+      val x = DenseMatrix.vertcat(aiter.next._1.mat, biter.next._1.mat)
+      res ::= x
+    }
+    if (aiter.hasNext) {
+      res ::= aiter.next._1.mat
+    } else if (biter.hasNext) {
+      res ::= biter.next._1.mat
+    }
+    res.iterator
+  }
   
-  def solveLeastSquaresWithManyL2(A: RowPartitionedMatrix, b: RowPartitionedMatrix, lambdas: Array[Double]): Seq[DenseMatrix[Double]] = ???
+  def solveLeastSquaresWithManyL2(A: RowPartitionedMatrix, b: RowPartitionedMatrix,lambdas: Array[Double]): Seq[DenseMatrix[Double]] = ???
   
   def solveManyLeastSquaresWithL2(A: RowPartitionedMatrix, b: RDD[Seq[DenseMatrix[Double]]], lambdas: Array[Double]): Seq[DenseMatrix[Double]] = ???
 }

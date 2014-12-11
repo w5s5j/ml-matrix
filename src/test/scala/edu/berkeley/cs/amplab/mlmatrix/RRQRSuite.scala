@@ -21,7 +21,8 @@ class RRQRSuite extends FunSuite with LocalSparkContext {
     println("t")
     println(t)
     println("localT")
-    println(localT)
+    println(tmpQRP)
+    localT.foreach(println)
   }
 
 }
