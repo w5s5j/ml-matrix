@@ -15,7 +15,8 @@ class RRQRSuite extends FunSuite with LocalSparkContext {
     val localA = A.collect()
     
     val t = new RRQR().rrqr(sc, A, 2)
-    val localT = qr.qrp(localA)
+    val tmpQRP = qrp(localA)
+    val localT = tmpQRP.pivotIndices.take(2)
 
     println("t")
     println(t)

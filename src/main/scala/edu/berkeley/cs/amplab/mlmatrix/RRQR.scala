@@ -46,29 +46,41 @@ class RRQR extends RowPartitionedSolver with Logging with Serializable {
     var curCols = nCols
     while (curCols > b) {
 
-      val g1 = roundN.zipWithIndex
-
-      var preCal = roundN.grouped(2).map { part =>
-        part match {
-          case (a, b) => DenseMatrix.vertcat(a.mat, b.mat) 
-          case _ => _.mat
+      val g1 = roundN.zipWithIndex.filter(_._2 % 2  == 0)
+      val g2 = roundN.zipWithIndex.filter(_._2 % 2  == 1)
+      
+      def comb(aiter: Iterator[(RowPartition, Long)],
+               biter: Iterator[(RowPartition, Long)])
+              :Iterator[DenseMatrix[Double]] = {
+        var res = List[DenseMatrix[Double]]()
+        while (aiter.hasNext && biter.hasNext) {
+          val x = DenseMatrix.vertcat(aiter.next._1.mat, biter.next._1.mat)
+          res ::= x
         }
+        if (aiter.hasNext) {
+          res ::= aiter.next._1.mat
+        } else if (biter.hasNext) {
+          res ::= biter.next._1.mat
+        }
+        res.iterator
       }
+
+      var preCal = g1.zipPartitions(g2)(comb)
 
       roundN = preCal.map { part =>
         if (part.cols.toLong <= b) {
-          part
+          RowPartition(part)
         } else {
           // pvt : pivot indices
-          val tmpR = new TSQR().qrR(RowPartitionedMatrix.fromArray(sc.parallelize(Seq(part.mat.data)), Seq.fill(1)(part.mat.rows), part.mat.cols))
+          val tmpR = new TSQR().qrR(RowPartitionedMatrix.fromArray(sc.parallelize(Seq(part.data)), Seq.fill(1)(part.rows), part.cols))
           val tmpQRP = qrp(tmpR)
           val getPvt = tmpQRP.pivotIndices.take(b)
           val getCols = getPvt.map { idx =>
-            part.mat(::, idx).toDenseMatrix
+            part(::, idx).toDenseMatrix
           }.reduceLeft { (col1, col2) =>
             DenseMatrix.vertcat(col1, col2)
           }
-          getCols
+          RowPartition(getCols)
         }
       }
 
@@ -87,4 +99,7 @@ class RRQR extends RowPartitionedSolver with Logging with Serializable {
       
   }
   
+  def solveLeastSquaresWithManyL2(A: RowPartitionedMatrix, b: RowPartitionedMatrix, lambdas: Array[Double]): Seq[DenseMatrix[Double]] = ???
+  
+  def solveManyLeastSquaresWithL2(A: RowPartitionedMatrix, b: RDD[Seq[DenseMatrix[Double]]], lambdas: Array[Double]): Seq[DenseMatrix[Double]] = ???
 }
