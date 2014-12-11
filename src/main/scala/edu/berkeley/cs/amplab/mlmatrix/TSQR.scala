@@ -5,29 +5,39 @@ import scala.collection.mutable.ArrayBuffer
 
 import breeze.linalg._
 
+import edu.berkeley.cs.amplab.mlmatrix.util.QRUtils
+import edu.berkeley.cs.amplab.mlmatrix.util.Utils
+
 import org.apache.spark.rdd.RDD
 import org.apache.spark.SparkConf
 import org.apache.spark.SparkContext
+import org.apache.spark.Accumulator
 import org.apache.spark.SparkContext._
-
-import edu.berkeley.cs.amplab.mlmatrix.util.QRUtils
-import edu.berkeley.cs.amplab.mlmatrix.util.Utils
 
 class TSQR extends RowPartitionedSolver with Logging with Serializable {
 
   def qrR(mat: RowPartitionedMatrix): DenseMatrix[Double] = {
+    val localQR = mat.rdd.context.accumulator(0.0, "Time taken for Local QR")
+
     val qrTree = mat.rdd.map { part =>
       if (part.mat.rows < part.mat.cols) {
         part.mat
       } else {
-        QRUtils.qrR(part.mat)
+        val begin = System.nanoTime
+        val r = QRUtils.qrR(part.mat)
+        localQR += ((System.nanoTime - begin) / 1000000)
+        r
       }
     }
-    Utils.treeReduce(qrTree, reduceQR, depth=2)
+    val depth = math.ceil(math.log(mat.rdd.partitions.size)/math.log(2)).toInt
+    Utils.treeReduce(qrTree, reduceQR(localQR, _ : DenseMatrix[Double], _ : DenseMatrix[Double]), depth=depth)
   }
 
-  private def reduceQR(a: DenseMatrix[Double], b: DenseMatrix[Double]): DenseMatrix[Double] = {
-    QRUtils.qrR(DenseMatrix.vertcat(a, b))
+  private def reduceQR(acc: Accumulator[Double], a: DenseMatrix[Double], b: DenseMatrix[Double]): DenseMatrix[Double] = {
+    val begin = System.nanoTime
+    val out = QRUtils.qrR(DenseMatrix.vertcat(a, b), false)
+    acc += ((System.nanoTime - begin) / 1e6)
+    out
   }
 
   def qrQR(mat: RowPartitionedMatrix): (RowPartitionedMatrix, DenseMatrix[Double]) = {
@@ -47,8 +57,8 @@ class TSQR extends RowPartitionedSolver with Logging with Serializable {
       (part._1, QRUtils.applyQ(yPart, tPart, qIn, transpose=false))
     }.flatMap { x =>
       val nrows = x._2.rows
-      Iterator((x._1 * 2, x._2(0 until nrows/2, ::)),
-               (x._1 * 2 + 1, x._2(nrows/2 until nrows, ::)))
+      Iterator((x._1 * 2, x._2),
+               (x._1 * 2 + 1, x._2))
     }
 
     var prevTree = qrRevTree
@@ -61,12 +71,19 @@ class TSQR extends RowPartitionedSolver with Logging with Serializable {
         qrRevTree = qrTree(curTreeIdx)._2.join(prevTree).flatMap { part =>
           val yPart = part._2._1._1
           val tPart = part._2._1._2
-          val qPart = part._2._2
+          val qPart = if (part._1 % 2 == 0) {
+            val e = math.min(yPart.rows, yPart.cols)
+            part._2._2(0 until e, ::)
+          } else {
+            val numRows = math.min(yPart.rows, yPart.cols)
+            val s = part._2._2.rows - numRows
+            part._2._2(s until part._2._2.rows, ::)
+          }
           if (part._1 * 2 + 1 < nextNumParts) {
             val qOut = QRUtils.applyQ(yPart, tPart, qPart, transpose=false)
             val nrows = qOut.rows
-            Iterator((part._1 * 2, qOut(0 until nrows/2, ::)),
-                     (part._1 * 2 + 1, qOut(nrows/2 until nrows, ::)))
+            Iterator((part._1 * 2, qOut),
+                     (part._1 * 2 + 1, qOut))
           } else {
             Iterator((part._1 * 2, qPart))
           }
@@ -75,7 +92,14 @@ class TSQR extends RowPartitionedSolver with Logging with Serializable {
         qrRevTree = qrTree(curTreeIdx)._2.join(prevTree).map { part =>
           val yPart = part._2._1._1
           val tPart = part._2._1._2
-          val qPart = part._2._2
+          val qPart = if (part._1 % 2 == 0) {
+            val e = math.min(yPart.rows, yPart.cols)
+            part._2._2(0 until e, ::)
+          } else {
+            val numRows = math.min(yPart.rows, yPart.cols)
+            val s = part._2._2.rows - numRows
+            part._2._2(s until part._2._2.rows, ::)
+          }
           (part._1, QRUtils.applyQ(yPart, tPart, qPart, transpose=false))
         }
       }
@@ -93,10 +117,23 @@ class TSQR extends RowPartitionedSolver with Logging with Serializable {
     val matPartInfoBroadcast = mat.rdd.context.broadcast(matPartInfo)
 
     var qrTree = mat.rdd.mapPartitionsWithIndex { case (part, iter) =>
-      val partBlockIds = matPartInfoBroadcast.value(part).sortBy(x=> x.blockId).map(x => x.blockId)
-      iter.zip(partBlockIds.iterator).map { case (lm, bi) =>
-        val qrResult = QRUtils.qrYTR(lm.mat)
-        (bi, qrResult)
+      if (matPartInfoBroadcast.value.contains(part) && !iter.isEmpty) {
+        val partBlockIds = matPartInfoBroadcast.value(part).sortBy(x=> x.blockId).map(x => x.blockId)
+        iter.zip(partBlockIds.iterator).map { case (lm, bi) =>
+          if (lm.mat.rows < lm.mat.cols) {
+            (
+              bi,
+              (new DenseMatrix[Double](lm.mat.rows, lm.mat.cols),
+               new Array[Double](lm.mat.rows),
+              lm.mat)
+            )
+          } else {
+            val qrResult = QRUtils.qrYTR(lm.mat)
+            (bi, qrResult)
+          }
+        }
+      } else {
+        Iterator()
       }
     }
 
@@ -116,7 +153,7 @@ class TSQR extends RowPartitionedSolver with Logging with Serializable {
 
   private def reduceYTR(
       a: (DenseMatrix[Double], Array[Double], DenseMatrix[Double]),
-      b: (DenseMatrix[Double], Array[Double], DenseMatrix[Double])) 
+      b: (DenseMatrix[Double], Array[Double], DenseMatrix[Double]))
     : (DenseMatrix[Double], Array[Double], DenseMatrix[Double]) = {
     QRUtils.qrYTR(DenseMatrix.vertcat(a._3, b._3))
   }
@@ -139,7 +176,8 @@ class TSQR extends RowPartitionedSolver with Logging with Serializable {
       }
     }
 
-    val qrResult = Utils.treeReduce(qrTree, reduceQRSolve, depth=2)
+    val depth = math.ceil(math.log(A.rdd.partitions.size)/math.log(2)).toInt
+    val qrResult = Utils.treeReduce(qrTree, reduceQRSolve, depth=depth)
 
     val results = lambdas.map { lambda =>
       // We only have one partition right now
@@ -147,7 +185,7 @@ class TSQR extends RowPartitionedSolver with Logging with Serializable {
       val out = if (lambda == 0.0) {
         rFinal \ bFinal
       } else {
-        val lambdaRB = (DenseMatrix.eye[Double](rFinal.cols) :* lambda,
+        val lambdaRB = (DenseMatrix.eye[Double](rFinal.cols) :* math.sqrt(lambda),
           new DenseMatrix[Double](rFinal.cols, bFinal.cols))
         val reduced = reduceQRSolve((rFinal, bFinal), lambdaRB)
         reduced._1 \ reduced._2
@@ -169,7 +207,7 @@ class TSQR extends RowPartitionedSolver with Logging with Serializable {
       b: RDD[Seq[DenseMatrix[Double]]],
       lambdas: Array[Double]): Seq[DenseMatrix[Double]] = {
 
-    val matrixParts = A.rdd.zip(b).map { x => 
+    val matrixParts = A.rdd.zip(b).map { x =>
       (x._1.mat, x._2)
     }
 
@@ -183,7 +221,8 @@ class TSQR extends RowPartitionedSolver with Logging with Serializable {
       }
     }
 
-    val qrResult = Utils.treeReduce(qrTree, reduceQRSolveMany, depth=2)
+    val qrResult = Utils.treeReduce(qrTree, reduceQRSolveMany, 
+      depth=math.ceil(math.log(A.rdd.partitions.size)/math.log(2)).toInt)
     val rFinal = qrResult._1
 
     val results = lambdas.zip(qrResult._2).map { case (lambda, bFinal) =>
@@ -191,7 +230,7 @@ class TSQR extends RowPartitionedSolver with Logging with Serializable {
       val out = if (lambda == 0.0) {
         rFinal \ bFinal
       } else {
-        val lambdaRB = (DenseMatrix.eye[Double](rFinal.cols) :* lambda,
+        val lambdaRB = (DenseMatrix.eye[Double](rFinal.cols) :* math.sqrt(lambda),
           new DenseMatrix[Double](rFinal.cols, bFinal.cols))
         val reduced = reduceQRSolve((rFinal, bFinal), lambdaRB)
         reduced._1 \ reduced._2
@@ -230,6 +269,8 @@ object TSQR extends Logging {
       .setJars(SparkContext.jarOfClass(this.getClass).toSeq)
     val sc = new SparkContext(conf)
 
+    Thread.sleep(5000)
+
     val rowsPerPart = numRows / numParts
     val matrixParts = sc.parallelize(1 to numParts, numParts).mapPartitions { part =>
       val data = new Array[Double](rowsPerPart * numCols)
@@ -249,16 +290,8 @@ object TSQR extends Logging {
     var end = System.nanoTime()
     logInfo("Random TSQR of " + numRows + "x" + numCols + " took " + (end - begin)/1e6 + "ms")
 
-    // Use the linear solver
-    begin = System.nanoTime()
-    val b =  A.mapPartitions(
-      part => DenseMatrix.rand(part.rows, numClasses)).cache()
-
-    val x = new TSQR().solveLeastSquares(A, b)
-    end = System.nanoTime()
-
+    var c = readChar
     sc.stop()
-    logInfo("Linear solver of " + numRows + "x" + numCols + " took " + (end - begin)/1e6 + "ms")
   }
-  
+
 }

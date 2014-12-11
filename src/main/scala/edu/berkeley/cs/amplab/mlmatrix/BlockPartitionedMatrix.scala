@@ -1,7 +1,7 @@
 package edu.berkeley.cs.amplab.mlmatrix
 
-import scala.reflect.ClassTag
 import scala.collection.mutable.ArrayBuffer
+import scala.reflect.ClassTag
 
 import breeze.linalg._
 
@@ -35,21 +35,24 @@ class BlockPartitionedMatrix(
 
   override def getDim = {
     val bi = getBlockInfo
-    val dims = bi.values.filter { part =>
-      (part.blockIdRow == 0) || (part.blockIdCol == 0)
-    }.flatMap { part =>
-      val dims = new ArrayBuffer[(Long, Long)]
-      if (part.blockIdRow == 0) {
-        dims += ((0L, part.numCols.toLong))
-      }
-      if (part.blockIdCol == 0) {
-        dims += ((part.numRows.toLong, 0L))
-      }
-      dims.iterator
-    }.reduceLeft { (a, b) =>
-      (a._1 + b._1, a._2 + b._2)
+
+    val xDim = bi.map { x =>
+      (x._1._1, x._2.numRows.toLong)
+    }.groupBy(x => x._1).values.map { x =>
+      x.head._2.toLong
+    }.reduceLeft {
+      _ + _
     }
-    dims
+
+    val yDim = bi.map { x =>
+      (x._1._2, x._2.numCols.toLong)
+    }.groupBy(x => x._1).values.map { x =>
+      x.head._2.toLong
+    }.reduceLeft {
+      _ + _
+    }
+
+    (xDim, yDim)
   }
 
   private def calculateBlockInfo() {
@@ -60,50 +63,51 @@ class BlockPartitionedMatrix(
       val partDimIter = iter.map { part =>
         val dims = new ArrayBuffer[(Int, Int, Long, Long)]
         val partIdMap = (part.blockIdRow, part.blockIdCol) -> partId
-        if (part.blockIdRow == 0 && part.blockIdCol == 0) {
-          dims += ((part.blockIdRow, part.blockIdCol,
-                    part.mat.rows.toLong, part.mat.cols.toLong))
-        } else {
-          if (part.blockIdCol == 0) {
-            dims += ((part.blockIdRow, part.blockIdCol,
-                      part.mat.rows.toLong, part.mat.cols.toLong))
-          }
-          if (part.blockIdRow == 0) {
-            dims += ((part.blockIdRow, part.blockIdCol,
-                      part.mat.rows.toLong, part.mat.cols.toLong))
-          }
-        }
+
+        dims += ((part.blockIdRow, part.blockIdCol,
+                 part.mat.rows.toLong, part.mat.cols.toLong))
+
         (partIdMap, dims)
       }
       partDimIter
     }.collect()
     val blockStartRowCols = blockStartRowColsParts.flatMap(x => x._2).sortBy(x => (x._1, x._2))
 
+    val rowReps = blockStartRowCols.groupBy(x => x._1).values.map { x =>
+      x.head
+    }.toSeq.sortBy{ x =>
+      (x._1, x._2)
+    }
+
+    val colReps = blockStartRowCols.groupBy(x => x._2).values.map { x =>
+      x.head
+    }.toSeq.sortBy{ x =>
+      (x._1, x._2)
+    }
+
     // Calculate startRows
-    val cumulativeRowSum = blockStartRowCols.filter {
-      x => x._2 == 0
-    }.scanLeft(0L) { case(x1, x2) =>
+    val cumulativeRowSum = rowReps.scanLeft(0L) { case(x1, x2) =>
       x1 + x2._3
     }.dropRight(1)
 
-    val rowStarts = blockStartRowCols.filter(x => x._2 == 0).zip(cumulativeRowSum).map { x =>
+    val rowStarts = rowReps.zip(cumulativeRowSum).map { x =>
       (x._1._1, (x._1._3, x._2))
     }.toMap
 
-    val cumulativeColSum = blockStartRowCols.filter {
-      x => x._1 == 0
-    }.scanLeft(0L) { case(x1, x2) =>
+    val cumulativeColSum = colReps.scanLeft(0L) { case(x1, x2) =>
       x1 + x2._4
     }.dropRight(1)
 
-    val colStarts = blockStartRowCols.filter(x => x._1 == 0).zip(cumulativeColSum).map { x =>
+    val colStarts = colReps.zip(cumulativeColSum).map { x =>
       (x._1._2, (x._1._4, x._2))
     }.toMap
 
     val partitionIdsMap = blockStartRowColsParts.map(x => x._1).toMap
 
     blockInfo_ = rowStarts.keys.flatMap { r =>
-      colStarts.keys.map { c =>
+      colStarts.keys.filter { c =>
+        partitionIdsMap.contains(r, c)
+      }.map { c =>
         ((r,c), BlockPartitionInfo(partitionIdsMap((r,c)),
           r, c, rowStarts(r)._2, rowStarts(r)._1.toInt, colStarts(c)._2, colStarts(c)._1.toInt))
       }
@@ -223,12 +227,15 @@ class BlockPartitionedMatrix(
       rowRange.filter(i => i >= bi._2.startRow && i < bi._2.startRow + bi._2.numRows).nonEmpty
     }.values.toSeq.sortBy(x => x.blockIdRow)
 
+    val blocksFilteredIds = blocksWithRows.map(bi => bi.partitionId).toSet
+    val prunedRdd = PartitionPruningRDD.create(rdd, part => blocksFilteredIds.contains(part))
+
     // Renumber the blockIdRows from 0 to number of row blocks
     val newBlockIdMap = blocksWithRows.map(x => x.blockIdRow).distinct.zipWithIndex.toMap
 
     val newBlockIdBcast = rdd.context.broadcast(newBlockIdMap)
 
-    val blockRDD = rdd.filter { part =>
+    val blockRDD = prunedRdd.filter { part =>
       newBlockIdBcast.value.contains(part.blockIdRow)
     }.map { part =>
       // Get a new blockIdRow, keep same blockIdCol and update the matrix
@@ -236,14 +243,14 @@ class BlockPartitionedMatrix(
       val blockInfo = blockInfosBcast.value((part.blockIdRow, part.blockIdCol))
 
       val validIdx = rowRange.filter { i =>
-        i >= blockInfo.startCol && i < blockInfo.startCol + blockInfo.numCols
+        i >= blockInfo.startRow && i < blockInfo.startRow + blockInfo.numRows
       }
 
-      val localIdx = validIdx.map(x => x - blockInfo.startCol).map(x => x.toInt)
+      val localIdx = validIdx.map(x => x - blockInfo.startRow).map(x => x.toInt)
       val newMat = part.mat(localIdx.head to localIdx.last, ::)
       BlockPartition(newBlockIdRow, blockInfo.blockIdCol, newMat)
     }
-    new BlockPartitionedMatrix(blocksWithRows.length, numColBlocks, blockRDD)
+    new BlockPartitionedMatrix(newBlockIdMap.size, numColBlocks, blockRDD)
   }
 
   override def apply(rowRange: ::.type, colRange: Range) = {
@@ -254,11 +261,14 @@ class BlockPartitionedMatrix(
       colRange.filter(i => i >= bi._2.startCol && i < bi._2.startCol + bi._2.numCols).nonEmpty
     }.values.toSeq.sortBy(x => x.blockIdCol)
 
+    val blocksFilteredIds = blocksWithCols.map(bi => bi.partitionId).toSet
+    val prunedRdd = PartitionPruningRDD.create(rdd, part => blocksFilteredIds.contains(part))
+
     // Renumber the blockIdRows from 0 to number of row blocks
     val newBlockIdMap = blocksWithCols.map(x => x.blockIdCol).distinct.zipWithIndex.toMap
     val newBlockIdBcast = rdd.context.broadcast(newBlockIdMap)
 
-    val blockRDD = rdd.filter { part =>
+    val blockRDD = prunedRdd.filter { part =>
       newBlockIdBcast.value.contains(part.blockIdCol)
     }.map { part =>
       // Get a new blockIdRow, keep same blockIdCol and update the matrix
@@ -273,7 +283,7 @@ class BlockPartitionedMatrix(
       val newMat = part.mat(::, localIdx.head to localIdx.last)
       BlockPartition(blockInfo.blockIdRow, newBlockIdCol, newMat)
     }
-    new BlockPartitionedMatrix(numRowBlocks, blocksWithCols.length, blockRDD)
+    new BlockPartitionedMatrix(numRowBlocks, newBlockIdMap.size, blockRDD)
   }
 
   override def apply(rowRange: Range, colRange: Range) = ???
@@ -293,9 +303,9 @@ class BlockPartitionedMatrix(
     parts.foreach { part =>
       val blockInfo = blockInfos((part._1._1, part._1._2))
       // Figure out where this part should be put
-      val rowRange = 
+      val rowRange =
         blockInfo.startRow.toInt until (blockInfo.startRow + blockInfo.numRows).toInt
-      val colRange = 
+      val colRange =
         blockInfo.startCol.toInt until (blockInfo.startCol + blockInfo.numCols).toInt
       mat(rowRange, colRange) := part._2
     }
@@ -316,7 +326,8 @@ class BlockPartitionedMatrix(
 
     val newBlockIds = blocksFiltered.mapValues { bi =>
       (bi.blockIdRow - startRowBlock, bi.blockIdCol - startColBlock)
-    }
+    }.map(identity)
+
     val newBlockIdBcast = rdd.context.broadcast(newBlockIds)
 
     val prunedRdd = PartitionPruningRDD.create(rdd, part => blocksFilteredIds.contains(part))
@@ -334,9 +345,7 @@ class BlockPartitionedMatrix(
   // Get a single column block as a row partitioned matrix
   def getColBlock(colBlock: Int) : RowPartitionedMatrix =  {
     val blockRDD = getBlockRange(0, numRowBlocks, colBlock, colBlock + 1)
-    RowPartitionedMatrix.fromMatrix(
-      blockRDD.rdd.map(x => (x.blockIdRow, x.mat)).sortByKey().values
-    )
+    RowPartitionedMatrix.fromMatrix(blockRDD.rdd.map(_.mat))
   }
 }
 
@@ -359,7 +368,7 @@ object BlockPartitionedMatrix {
         numRows += 1L
         numCols = iter.next().length
       }
-      Iterator((part, numRows, numCols))
+      Iterator.single( (part, numRows, numCols) )
     }.collect().sortBy(x => x._1)
 
     val cumulativeSum = perPartDims.scanLeft(0L){ case(x1, x2) =>
@@ -377,7 +386,7 @@ object BlockPartitionedMatrix {
 
     val blockRDD = matrixRDD.mapPartitionsWithIndex { case (part, iter) =>
       val startRow = rowStartsBroadcast.value(part)._1
-      val ret = new ArrayBuffer[((Int, Int), Array[Double])]
+      val ret = new ArrayBuffer[(Int, Array[Double])]
       var rowNo = 0L
       while (iter.hasNext) {
         // For each row
@@ -386,7 +395,7 @@ object BlockPartitionedMatrix {
         rowNo += 1
         (0 until numColBlocks).foreach { col =>
           ret.append(
-            ((rowBlock, col),
+            (rowBlock * numColBlocks + col,
              arr.slice(col * numColsPerBlock, (col + 1) * numColsPerBlock))
           )
         }
@@ -403,7 +412,7 @@ object BlockPartitionedMatrix {
         numRows += 1
         numCols = arr.length
       }
-      new BlockPartition(item._1._1, item._1._2,
+      new BlockPartition(item._1 / numColBlocks, item._1 % numColBlocks,
         new DenseMatrix[Double](numCols, numRows, matData.toArray).t)
     }
 

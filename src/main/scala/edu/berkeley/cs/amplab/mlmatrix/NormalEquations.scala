@@ -4,12 +4,12 @@ import java.util.concurrent.ThreadLocalRandom
 
 import breeze.linalg._
 
+import edu.berkeley.cs.amplab.mlmatrix.util.Utils
+
 import org.apache.spark.SparkConf
 import org.apache.spark.rdd.RDD
 import org.apache.spark.SparkContext._
 import org.apache.spark.SparkContext
-
-import edu.berkeley.cs.amplab.mlmatrix.util.Utils
 
 class NormalEquations extends RowPartitionedSolver with Logging with Serializable {
 
@@ -18,7 +18,7 @@ class NormalEquations extends RowPartitionedSolver with Logging with Serializabl
       b: RDD[Seq[DenseMatrix[Double]]],
       lambdas: Array[Double]): Seq[DenseMatrix[Double]] = {
 
-    val Abs = A.rdd.zip(b).map { x => 
+    val Abs = A.rdd.zip(b).map { x =>
       (x._1.mat, x._2)
     }
 
@@ -30,10 +30,11 @@ class NormalEquations extends RowPartitionedSolver with Logging with Serializabl
       (AtA, AtBs)
     }
 
-    val reduced = Utils.treeReduce(ATA_ATb, reduceNormalMany, depth=2)
+    val depth = math.ceil(math.log(ATA_ATb.partitions.size)/math.log(2)).toInt
+    val reduced = Utils.treeReduce(ATA_ATb, reduceNormalMany, depth=depth)
 
     val ATA = reduced._1
-    
+
     // Local solve
     val xs = lambdas.zip(reduced._2).map { l =>
       val gamma = DenseMatrix.eye[Double](ATA.rows)
@@ -46,7 +47,7 @@ class NormalEquations extends RowPartitionedSolver with Logging with Serializabl
 
   private def reduceNormalMany(
     a: (DenseMatrix[Double], Seq[DenseMatrix[Double]]),
-    b: (DenseMatrix[Double], Seq[DenseMatrix[Double]])): 
+    b: (DenseMatrix[Double], Seq[DenseMatrix[Double]])):
       (DenseMatrix[Double], Seq[DenseMatrix[Double]]) = {
     a._1 :+= b._1
     a._2.zip(b._2).map { z =>
@@ -64,7 +65,8 @@ class NormalEquations extends RowPartitionedSolver with Logging with Serializabl
       (part._1.t * part._1, part._1.t * part._2)
     }
 
-    val reduced = Utils.treeReduce(ATA_ATb, reduceNormal, depth=2)
+    val depth = math.ceil(math.log(ATA_ATb.partitions.size)/math.log(2)).toInt
+    val reduced = Utils.treeReduce(ATA_ATb, reduceNormal, depth=depth)
 
     val xs = lambdas.map { l =>
       val gamma = DenseMatrix.eye[Double](reduced._1.rows)

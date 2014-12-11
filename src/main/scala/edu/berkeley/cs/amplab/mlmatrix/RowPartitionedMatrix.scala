@@ -5,6 +5,10 @@ import scala.reflect.ClassTag
 
 import breeze.linalg._
 
+import com.github.fommil.netlib.LAPACK.{getInstance=>lapack}
+import org.netlib.util.intW
+import org.netlib.util.doubleW
+
 import org.apache.spark.{SparkContext, SparkException}
 import org.apache.spark.rdd.RDD
 
@@ -36,18 +40,21 @@ class RowPartitionedMatrix(
   private def calculatePartitionInfo() {
     // Partition information sorted by (partitionId, matrixInPartition)
     val rowsPerPartition = rdd.mapPartitionsWithIndex { case (part, iter) =>
-      iter.zipWithIndex.map(x => (part, x._2, x._1.mat.rows.toLong))
+      if (iter.isEmpty) {
+        Iterator()
+      } else {
+        iter.zipWithIndex.map(x => (part, x._2, x._1.mat.rows.toLong))
+      }
     }.collect().sortBy(x => (x._1, x._2))
 
     // TODO(shivaram): Test this and make it simpler ?
+    val blocksPerPartition = rowsPerPartition.groupBy(x => x._1).mapValues(_.length)
+
     val partitionBlockStart = new collection.mutable.HashMap[Int, Int]
     partitionBlockStart.put(0, 0)
-    rowsPerPartition.foreach { part =>
-      if (partitionBlockStart.contains(part._1 + 1)) {
-        partitionBlockStart(part._1 + 1) += 1
-      } else {
-        partitionBlockStart.put(part._1 + 1, partitionBlockStart(part._1) + 1)
-      }
+    (1 until rdd.partitions.size).foreach { p =>
+      partitionBlockStart(p) =
+        blocksPerPartition.getOrElse(p - 1, 0) + partitionBlockStart(p - 1)
     }
 
     val rowsWithblockIds = rowsPerPartition.map { x =>
@@ -151,16 +158,23 @@ class RowPartitionedMatrix(
 
     // First filter partitions which have rows in this index, then select them
     RowPartitionedMatrix.fromMatrix(rdd.mapPartitionsWithIndex { case (part, iter) =>
-      val startRows = partitionBroadcast.value(part).sortBy(x => x.blockId).map(x => x.startRow)
-      iter.zip(startRows.iterator).flatMap { case (lm, sr) =>
-        if (sr >= rowRange.start && sr < rowRange.end) {
-          // The end row is min of number of rows in this partition
-          // and number of rows left to read
-          val er = min(lm.mat.rows, (rowRange.end - sr).toInt)
-          Iterator(lm.mat(0 until er, colRange))
-        } else {
-          Iterator()
+      if (partitionBroadcast.value.contains(part)) {
+        val startRows = partitionBroadcast.value(part).sortBy(x => x.blockId).map(x => x.startRow)
+        iter.zip(startRows.iterator).flatMap { case (lm, sr) =>
+          // TODO: Handle Longs vs. Ints correctly here
+          val matRange = sr.toInt until (sr.toInt + lm.mat.rows)
+          if (matRange.contains(rowRange.start) || rowRange.contains(sr.toInt)) {
+            // The end row is min of number of rows in this partition
+            // and number of rows left to read
+            val start = (math.max(rowRange.start - sr, 0)).toInt
+            val end = (math.min(rowRange.end - sr, lm.mat.rows)).toInt
+            Iterator(lm.mat(start until end, colRange))
+          } else {
+            Iterator()
+          }
         }
+      } else {
+        Iterator()
       }
     })
   }
@@ -177,6 +191,27 @@ class RowPartitionedMatrix(
     parts.reduceLeftOption((a,b) => DenseMatrix.vertcat(a, b)).getOrElse(new DenseMatrix[Double](0, 0))
   }
 
+  def qrR(): DenseMatrix[Double] = {
+     new TSQR().qrR(this)
+  }
+
+  // Estimate the condition number of the matrix
+  // Optionally pass in a R that correspondings to the R matrix obtained
+  // by a QR decomposition
+  def condEst(rOpt: Option[DenseMatrix[Double]] = None): Double = {
+    val R = rOpt match {
+      case None => qrR()
+      case Some(rMat) => rMat
+    }
+    val n = R.rows
+    val work = new Array[Double](3*n)
+    val iwork = new Array[Int](n)
+    val rcond = new doubleW(0)
+    val info = new intW(0)
+    lapack.dtrcon("1", "U", "n", n, R.data, n, rcond, work, iwork, info)
+    1/(rcond.`val`)
+  }
+
   // Apply a function to each partition of the matrix
   def mapPartitions(f: DenseMatrix[Double] => DenseMatrix[Double]) = {
     // TODO: This can be efficient if we don't change num rows per partition
@@ -184,8 +219,6 @@ class RowPartitionedMatrix(
       f(lm.mat)
     })
   }
-
-  // def repartition ?
 }
 
 object RowPartitionedMatrix {

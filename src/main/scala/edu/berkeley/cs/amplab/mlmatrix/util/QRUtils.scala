@@ -8,12 +8,12 @@ import com.github.fommil.netlib.LAPACK.{getInstance=>lapack}
 object QRUtils {
 
   /**
-   * Compute a QR decomposition. 
+   * Compute a QR decomposition.
    * @returns Y, the householder reflectors
    * @returns T, the scalar factors
    * @returns R, upper triangular
    */
-  def qrYTR(A: DenseMatrix[Double]) = {
+  def qrYTR(A: DenseMatrix[Double], cloneMatrix: Boolean = true) = {
     val m = A.rows
     val n = A.cols
 
@@ -29,7 +29,11 @@ object QRUtils {
     val maxd = scala.math.max(m, n)
     val mind = scala.math.min(m, n)
     val tau = new Array[Double](mind)
-    val outputMat = Utils.cloneMatrix(A)
+    val outputMat = if (cloneMatrix) {
+      Utils.cloneMatrix(A)
+    } else {
+      A
+    }
     lapack.dgeqrf(m, n, outputMat.data, m, tau, workspace, workspace.length, info)
 
     // Error check
@@ -49,16 +53,17 @@ object QRUtils {
       }
       r = r + 1
     }
-    
+
     (outputMat, tau, R)
   }
 
   /**
    * Compute R from a reduced or thin QR factorization
    */
-  def qrR(A: DenseMatrix[Double]) = {
-    qrYTR(A)._3
+  def qrR(A: DenseMatrix[Double], cloneMatrix: Boolean = true) = {
+    qrYTR(A, cloneMatrix)._3
   }
+
 
   /**
    * Compute a reduced or thin QR factorization
@@ -124,7 +129,7 @@ object QRUtils {
         r
       }
 
-    val work = new Array[Double](1) 
+    val work = new Array[Double](1)
     val info = new intW(0)
     val trans = if (transpose) "T" else "N"
 
@@ -144,7 +149,8 @@ object QRUtils {
 
     // Select only the first N rows if we multiplied by t(Q)
     if (transpose) {
-      result(0 until Y.cols, ::)
+      val rowsToSelect = min(Y.cols, result.rows)
+      result(0 until rowsToSelect, ::)
     } else {
       result
     }
