@@ -33,7 +33,7 @@ class RRQR extends RowPartitionedSolver with Logging with Serializable {
         val tmpQRP = qrp(tmpR)
         val getPvt = tmpQRP.pivotIndices.take(b)
         val getCols = getPvt.map { idx =>
-          part.mat(::, idx).toDenseMatrix()
+          part.mat(::, idx).toDenseMatrix
         }.reduceLeft { (col1, col2) =>
           DenseMatrix.vertcat(col1, col2)
         }
@@ -45,6 +45,9 @@ class RRQR extends RowPartitionedSolver with Logging with Serializable {
 
     var curCols = nCols
     while (curCols > b) {
+
+      val g1 = roundN.zipWithIndex
+
       var preCal = roundN.grouped(2).map { part =>
         part match {
           case (a, b) => DenseMatrix.vertcat(a.mat, b.mat) 
@@ -61,7 +64,7 @@ class RRQR extends RowPartitionedSolver with Logging with Serializable {
           val tmpQRP = qrp(tmpR)
           val getPvt = tmpQRP.pivotIndices.take(b)
           val getCols = getPvt.map { idx =>
-            part.mat(::, idx).toDenseMatrix()
+            part.mat(::, idx).toDenseMatrix
           }.reduceLeft { (col1, col2) =>
             DenseMatrix.vertcat(col1, col2)
           }
@@ -69,9 +72,10 @@ class RRQR extends RowPartitionedSolver with Logging with Serializable {
         }
       }
 
-      curCols = roundN.reduce { (part1, part2) =>
-        part1.mat.cols.toInt + part2.mat.cols.toInt
-      }
+      curCols = roundN.map { part => 
+        part.mat.cols.toInt 
+      }.reduce(_ + _)
+
 
     }
 
