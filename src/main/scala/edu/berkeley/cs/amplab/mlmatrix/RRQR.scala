@@ -49,11 +49,9 @@ class RRQR extends RowPartitionedSolver with Logging with Serializable {
     }
     
     var roundN = round1
-
     var curCols = nCols
     // TODO: Naive inplement for tree reduction, need to be improve
     while (curCols > b) {
-
       // group roundN, two elements in the same group and vertcat them
       // eg. [1, 2, 3, 4, 5, 6] => [vertcat(1, 2), vertcat(3, 4), vertcat(5, 6)]
       //     [1, 2, 3, 4, 5] => [vertcat(1, 2), vertcat(3, 4), 5]
@@ -61,7 +59,6 @@ class RRQR extends RowPartitionedSolver with Logging with Serializable {
       val g1 = roundN.zipWithIndex.filter(_._2 % 2  == 0)
       val g2 = roundN.zipWithIndex.filter(_._2 % 2  == 1)
       var preCal = g1.zipPartitions(g2)(comb)
-
       // roundN is basically the same as round1 except it starts from a RDD[DenseMatrix]
       roundN = preCal.map { part =>
         if (part.cols.toLong <= b) {
@@ -85,8 +82,6 @@ class RRQR extends RowPartitionedSolver with Logging with Serializable {
       curCols = roundN.map { part => 
         part.mat.cols.toInt 
       }.reduce(_ + _)
-
-
     }
 
     // return a dense matrix, vertcat all RowPartition
@@ -95,7 +90,6 @@ class RRQR extends RowPartitionedSolver with Logging with Serializable {
     }.reduceLeft { (col1, col2) =>
       DenseMatrix.vertcat(col1, col2)
     }
-      
   }
 
   //helper function for combine two Iter
