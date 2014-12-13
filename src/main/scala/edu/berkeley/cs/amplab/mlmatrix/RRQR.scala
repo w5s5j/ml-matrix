@@ -43,9 +43,9 @@ class RRQR extends RowPartitionedSolver with Logging with Serializable {
         // based on the original Partition
         val getPvt = qrp(tmpR).pivotIndices.take(b)
         RowPartition(getPvt.map { idx =>
-          part.mat(::, idx).toDenseMatrix
+          part.mat(::, idx).toDenseMatrix.t
         }.reduceLeft { (col1, col2) =>
-          DenseMatrix.vertcat(col1, col2)
+          DenseMatrix.horzcat(col1, col2)
         })
       }
     }
@@ -57,6 +57,7 @@ class RRQR extends RowPartitionedSolver with Logging with Serializable {
     // TODO: Naive inplement for tree reduction, need to be improve
     println(b)
     while (curCols > b*2) {
+    //while (curCols > b) {
 
 
       println("loop")
@@ -80,9 +81,9 @@ class RRQR extends RowPartitionedSolver with Logging with Serializable {
           val tmpQRP = qrp(tmpR)
           val getPvt = tmpQRP.pivotIndices.take(b)
           val getCols = getPvt.map { idx =>
-            part(::, idx).toDenseMatrix
+            part(::, idx).toDenseMatrix.t
           }.reduceLeft { (col1, col2) =>
-            DenseMatrix.vertcat(col1, col2)
+            DenseMatrix.horzcat(col1, col2)
           }
           RowPartition(getCols)
         }
@@ -97,7 +98,7 @@ class RRQR extends RowPartitionedSolver with Logging with Serializable {
       println(roundN.map { part =>
         part.mat
       }.reduce { (col1, col2) =>
-        DenseMatrix.vertcat(col1, col2)
+        DenseMatrix.horzcat(col1, col2)
       })
 
 
@@ -108,7 +109,7 @@ class RRQR extends RowPartitionedSolver with Logging with Serializable {
     roundN.map { part =>
       part.mat
     }.reduce { (col1, col2) =>
-      DenseMatrix.vertcat(col1, col2)
+      DenseMatrix.horzcat(col1, col2)
     }
   }
 
@@ -118,7 +119,7 @@ class RRQR extends RowPartitionedSolver with Logging with Serializable {
           :Iterator[DenseMatrix[Double]] = {
     var res = List[DenseMatrix[Double]]()
     while (aiter.hasNext && biter.hasNext) {
-      val x = DenseMatrix.vertcat(aiter.next._1.mat, biter.next._1.mat)
+      val x = DenseMatrix.horzcat(aiter.next._1.mat, biter.next._1.mat)
       res ::= x
     }
     if (aiter.hasNext) {
