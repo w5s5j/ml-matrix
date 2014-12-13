@@ -13,15 +13,19 @@ class RRQRSuite extends FunSuite with LocalSparkContext {
     sc = new SparkContext("local", "test")
     val A = RowPartitionedMatrix.createRandom(sc, 8, 4, 2, cache=true)
     val localA = A.collect()
+    println(localA)
     
-    val t = new RRQR().rrqr(sc, A, 2)
+    val t = new RRQR().rrqr(A, 2)
     val tmpQRP = qrp(localA)
     val localT = tmpQRP.pivotIndices.take(2)
 
     println("t")
     println(t)
     println("localT")
-    println(tmpQRP)
+    println(tmpQRP.q)
+    println(tmpQRP.r)
+    println(tmpQRP.pivotMatrix)
+    println(tmpQRP.pivotIndices)
     localT.foreach(println)
   }
 

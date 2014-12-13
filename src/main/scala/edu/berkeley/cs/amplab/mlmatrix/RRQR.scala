@@ -14,27 +14,29 @@ import edu.berkeley.cs.amplab.mlmatrix.util.Utils
 class RRQR extends RowPartitionedSolver with Logging with Serializable {
 
   // b is the number of selected col
-  def rrqr(sc: SparkContext, mat: RowPartitionedMatrix, b: Int): DenseMatrix[Double] = {
+  def rrqr(matrix: RowPartitionedMatrix, b: Int): DenseMatrix[Double] = {
     //base on the paper
     val bt = 2 * b
-    mat.cache()
-    val (nRows, nCols) = mat.getDim()
+    matrix.cache()
+    val (nRows, nCols) = matrix.getDim()
     
     // TODO: need to check each partition
     //val matrixInfo = mat.rdd.map { part =>
       //(part.mat.rows.toLong, part.mat.rows.toLong)
     //}
     
+    println("s1")
     // Compute the first round, do TSQR and get just R on each partition
     // for partition which number of column less than b, stay the same
     // round1 is RDD[RowPartition]
     // mat.rdd is RDD[RowPartition]
-    val round1 = mat.rdd.map { part =>
+    val round1 = matrix.rdd.map { part =>
       if (part.mat.cols <= b) {
         part
       } else {
         // Do TSQR to get just R
-        val tmpR = new TSQR().qrR(RowPartitionedMatrix.fromArray(sc.parallelize(Seq(part.mat.data)), Seq.fill(1)(part.mat.rows), part.mat.cols))
+        //val tmpR = new TSQR().qrR(RowPartitionedMatrix.fromArray(matrix.rdd.sparkContext.parallelize(Seq(part.mat.data)), Seq.fill(1)(part.mat.rows), part.mat.cols))
+        val tmpR = QRUtils.qrR(part.mat)
         // pvt : pivot indices
         // Do RRQR on the R just get 
         // and take the first b elements in pivot to form the matrix 
@@ -50,10 +52,16 @@ class RRQR extends RowPartitionedSolver with Logging with Serializable {
     
     var roundN = round1
 
+    println("s2")
     var curCols = nCols
     // TODO: Naive inplement for tree reduction, need to be improve
-    while (curCols > b) {
+    println(b)
+    while (curCols > b*2) {
 
+
+      println("loop")
+      println(roundN)
+      println(curCols)
       // group roundN, two elements in the same group and vertcat them
       // eg. [1, 2, 3, 4, 5, 6] => [vertcat(1, 2), vertcat(3, 4), vertcat(5, 6)]
       //     [1, 2, 3, 4, 5] => [vertcat(1, 2), vertcat(3, 4), 5]
@@ -68,7 +76,8 @@ class RRQR extends RowPartitionedSolver with Logging with Serializable {
           RowPartition(part)
         } else {
           // pvt : pivot indices
-          val tmpR = new TSQR().qrR(RowPartitionedMatrix.fromArray(sc.parallelize(Seq(part.data)), Seq.fill(1)(part.rows), part.cols))
+          //val tmpR = new TSQR().qrR(RowPartitionedMatrix.fromArray(matrix.rdd.sparkContext.parallelize(Seq(part.data)), Seq.fill(1)(part.rows), part.cols))
+          val tmpR = QRUtils.qrR(part)
           val tmpQRP = qrp(tmpR)
           val getPvt = tmpQRP.pivotIndices.take(b)
           val getCols = getPvt.map { idx =>
@@ -82,17 +91,24 @@ class RRQR extends RowPartitionedSolver with Logging with Serializable {
 
       // Compute the total number of cols in each iteration, needed to decide whether
       // to continue the reduction
-      curCols = roundN.map { part => 
+      curCols = roundN.map { part =>
         part.mat.cols.toInt 
       }.reduce(_ + _)
+
+      println(roundN.map { part =>
+        part.mat
+      }.reduce { (col1, col2) =>
+        DenseMatrix.vertcat(col1, col2)
+      })
 
 
     }
 
+    println("gothrough")
     // return a dense matrix, vertcat all RowPartition
-    roundN.collect().map { part =>
+    roundN.map { part =>
       part.mat
-    }.reduceLeft { (col1, col2) =>
+    }.reduce { (col1, col2) =>
       DenseMatrix.vertcat(col1, col2)
     }
       
