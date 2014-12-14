@@ -11,7 +11,7 @@ class RRQRSuite extends FunSuite with LocalSparkContext {
 
   test("Test RRQR") {
     sc = new SparkContext("local", "test")
-    val A = RowPartitionedMatrix.createRandom(sc, 8, 4, 2, cache=true)
+    val A = ColPartitionedMatrix.createRandom(sc, 8, 4, 2, cache=true)
     val localA = A.collect()
     println(localA)
     

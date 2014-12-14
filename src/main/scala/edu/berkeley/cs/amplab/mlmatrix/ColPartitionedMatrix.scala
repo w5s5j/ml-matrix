@@ -13,26 +13,26 @@ import org.apache.spark.{SparkContext, SparkException}
 import org.apache.spark.rdd.RDD
 
 /** Note: [[breeze.linalg.DenseMatrix]] by default uses column-major layout. */
-case class RowPartition(mat: DenseMatrix[Double]) extends Serializable
-case class RowPartitionInfo(
+case class ColPartition(mat: DenseMatrix[Double]) extends Serializable
+case class ColPartitionInfo(
   partitionId: Int, // RDD partition this block is in
   blockId: Int, // BlockId goes from 0 to numBlocks
   startRow: Long) extends Serializable
 
-class RowPartitionedMatrix(
-  val rdd: RDD[RowPartition],
+class ColPartitionedMatrix(
+  val rdd: RDD[ColPartition],
   rows: Option[Long] = None,
   cols: Option[Long] = None) extends DistributedMatrix(rows, cols) with Logging {
 
-  // Map from partitionId to RowPartitionInfo
-  // Each RDD partition can have multiple RowPartition
-  @transient var partitionInfo_ : Map[Int, Array[RowPartitionInfo]] = null
+  // Map from partitionId to ColPartitionInfo
+  // Each RDD partition can have multiple ColPartition
+  @transient var partitionInfo_ : Map[Int, Array[ColPartitionInfo]] = null
 
   override def getDim() = {
     val dims = rdd.map { lm =>
       (lm.mat.rows.toLong, lm.mat.cols.toLong)
     }.reduce { case(a, b) =>
-      (a._1 + b._1, a._2)
+      (a._1, a._2 + b._2)
     }
     dims
   }
@@ -66,7 +66,7 @@ class RowPartitionedMatrix(
     }.dropRight(1)
 
     partitionInfo_ = rowsWithblockIds.map(x => (x._1, x._2)).zip(
-      cumulativeSum).map(x => RowPartitionInfo(x._1._1, x._1._2, x._2)).groupBy(x => x.partitionId)
+      cumulativeSum).map(x => ColPartitionInfo(x._1._1, x._1._2, x._2)).groupBy(x => x.partitionId)
   }
 
   def getPartitionInfo = {
@@ -77,20 +77,20 @@ class RowPartitionedMatrix(
   }
 
   override def +(other: Double) = {
-    new RowPartitionedMatrix(rdd.map { lm =>
-      RowPartition(lm.mat :+ other)
+    new ColPartitionedMatrix(rdd.map { lm =>
+      ColPartition(lm.mat :+ other)
     }, rows, cols)
   }
 
   override def *(other: Double) = {
-    new RowPartitionedMatrix(rdd.map { lm =>
-      RowPartition(lm.mat :* other)
+    new ColPartitionedMatrix(rdd.map { lm =>
+      ColPartition(lm.mat :* other)
     }, rows, cols)
   }
 
   override def mapElements(f: Double => Double) = {
-    new RowPartitionedMatrix(rdd.map { lm =>
-      RowPartition(
+    new ColPartitionedMatrix(rdd.map { lm =>
+      ColPartition(
         new DenseMatrix[Double](lm.mat.rows, lm.mat.cols, lm.mat.data.map(f)))
     }, rows, cols)
   }
@@ -106,9 +106,9 @@ class RowPartitionedMatrix(
       // get row-major layout by transposing
       val rows = rowPart.mat.data.grouped(rowPart.mat.rows).toSeq.transpose
       val reduced = rows.map(_.reduce(f)).toArray
-      RowPartition(new DenseMatrix[Double](rowPart.mat.rows, 1, reduced))
+      ColPartition(new DenseMatrix[Double](rowPart.mat.rows, 1, reduced))
     }
-    new RowPartitionedMatrix(reducedRows, rows, Some(1))
+    new ColPartitionedMatrix(reducedRows, rows, Some(1))
   }
 
   override def reduceColElements(f: (Double, Double) => Double): DistributedMatrix = {
@@ -117,18 +117,18 @@ class RowPartitionedMatrix(
       cols.map(_.reduce(f)).toArray
     }
     val collapsed = reducedColsPerPart.reduce { case arrPair => arrPair.zipped.map(f) }
-    RowPartitionedMatrix.fromArray(
+    ColPartitionedMatrix.fromArray(
       rdd.sparkContext.parallelize(Seq(collapsed), 1), Seq(1), numCols().toInt)
   }
 
   override def +(other: DistributedMatrix) = {
     other match {
-      case otherBlocked: RowPartitionedMatrix =>
+      case otherBlocked: ColPartitionedMatrix =>
         if (this.dim == other.dim) {
           // Check if matrices share same partitioner and can be zipped
           if (rdd.partitions.size == otherBlocked.rdd.partitions.size) {
-            new RowPartitionedMatrix(rdd.zip(otherBlocked.rdd).map { case (lm, otherLM) =>
-              RowPartition(lm.mat :+ otherLM.mat)
+            new ColPartitionedMatrix(rdd.zip(otherBlocked.rdd).map { case (lm, otherLM) =>
+              ColPartition(lm.mat :+ otherLM.mat)
             }, rows, cols)
           } else {
             throw new SparkException(
@@ -147,8 +147,8 @@ class RowPartitionedMatrix(
   }
 
   override def apply(rowRange: ::.type, colRange: Range) = {
-    new RowPartitionedMatrix(rdd.map { lm =>
-      RowPartition(lm.mat(::, colRange))
+    new ColPartitionedMatrix(rdd.map { lm =>
+      ColPartition(lm.mat(::, colRange))
     })
   }
 
@@ -157,7 +157,7 @@ class RowPartitionedMatrix(
     val partitionBroadcast = rdd.sparkContext.broadcast(getPartitionInfo)
 
     // First filter partitions which have rows in this index, then select them
-    RowPartitionedMatrix.fromMatrix(rdd.mapPartitionsWithIndex { case (part, iter) =>
+    ColPartitionedMatrix.fromMatrix(rdd.mapPartitionsWithIndex { case (part, iter) =>
       if (partitionBroadcast.value.contains(part)) {
         val startRows = partitionBroadcast.value(part).sortBy(x => x.blockId).map(x => x.startRow)
         iter.zip(startRows.iterator).flatMap { case (lm, sr) =>
@@ -188,56 +188,35 @@ class RowPartitionedMatrix(
   // Make this more efficient
   override def collect(): DenseMatrix[Double] = {
     val parts = rdd.map(x => x.mat).collect()
-    parts.reduceLeftOption((a,b) => DenseMatrix.vertcat(a, b)).getOrElse(new DenseMatrix[Double](0, 0))
-  }
-
-  def qrR(): DenseMatrix[Double] = {
-     new TSQR().qrR(this)
-  }
-
-  // Estimate the condition number of the matrix
-  // Optionally pass in a R that correspondings to the R matrix obtained
-  // by a QR decomposition
-  def condEst(rOpt: Option[DenseMatrix[Double]] = None): Double = {
-    val R = rOpt match {
-      case None => qrR()
-      case Some(rMat) => rMat
-    }
-    val n = R.rows
-    val work = new Array[Double](3*n)
-    val iwork = new Array[Int](n)
-    val rcond = new doubleW(0)
-    val info = new intW(0)
-    lapack.dtrcon("1", "U", "n", n, R.data, n, rcond, work, iwork, info)
-    1/(rcond.`val`)
+    parts.reduceLeftOption((a,b) => DenseMatrix.horzcat(a, b)).getOrElse(new DenseMatrix[Double](0, 0))
   }
 
   // Apply a function to each partition of the matrix
   def mapPartitions(f: DenseMatrix[Double] => DenseMatrix[Double]) = {
     // TODO: This can be efficient if we don't change num rows per partition
-    RowPartitionedMatrix.fromMatrix(rdd.map { lm =>
+    ColPartitionedMatrix.fromMatrix(rdd.map { lm =>
       f(lm.mat)
     })
   }
 }
 
-object RowPartitionedMatrix {
+object ColPartitionedMatrix {
 
-  // Convert an RDD[DenseMatrix[Double]] to an RDD[RowPartition]
-  def fromMatrix(matrixRDD: RDD[DenseMatrix[Double]]): RowPartitionedMatrix = {
-    new RowPartitionedMatrix(matrixRDD.map(mat => RowPartition(mat)))
+  // Convert an RDD[DenseMatrix[Double]] to an RDD[ColPartition]
+  def fromMatrix(matrixRDD: RDD[DenseMatrix[Double]]): ColPartitionedMatrix = {
+    new ColPartitionedMatrix(matrixRDD.map(mat => ColPartition(mat)))
   }
 
-  def fromArray(matrixRDD: RDD[Array[Double]]): RowPartitionedMatrix = {
+  def fromArray(matrixRDD: RDD[Array[Double]]): ColPartitionedMatrix = {
     fromMatrix(arrayToMatrix(matrixRDD))
   }
 
   def fromArray(
       matrixRDD: RDD[Array[Double]],
       rowsPerPartition: Seq[Int],
-      cols: Int): RowPartitionedMatrix = {
-    new RowPartitionedMatrix(
-      arrayToMatrix(matrixRDD, rowsPerPartition, cols).map(mat => RowPartition(mat)),
+      cols: Int): ColPartitionedMatrix = {
+    new ColPartitionedMatrix(
+      arrayToMatrix(matrixRDD, rowsPerPartition, cols).map(mat => ColPartition(mat)),
         Some(rowsPerPartition.sum), Some(cols))
   }
 
@@ -298,22 +277,22 @@ object RowPartitionedMatrix {
       numRows: Int,
       numCols: Int,
       numParts: Int,
-      cache: Boolean = true): RowPartitionedMatrix = {
-    val rowsPerPart = numRows / numParts
+      cache: Boolean = true): ColPartitionedMatrix = {
+    val colsPerPart = numCols / numParts
     val matrixParts = sc.parallelize(1 to numParts, numParts).mapPartitions { part =>
-      val data = new Array[Double](rowsPerPart * numCols)
+      val data = new Array[Double](colsPerPart * numRows)
       var i = 0
-      while (i < rowsPerPart*numCols) {
+      while (i < colsPerPart*numRows) {
         data(i) = ThreadLocalRandom.current().nextDouble()
         i = i + 1
       }
-      val mat = new DenseMatrix[Double](rowsPerPart, numCols, data)
+      val mat = new DenseMatrix[Double](numRows, colsPerPart, data)
       Iterator(mat)
     }
     if (cache) {
       matrixParts.cache()
     }
-    RowPartitionedMatrix.fromMatrix(matrixParts)
+    ColPartitionedMatrix.fromMatrix(matrixParts)
   }
 
 }
