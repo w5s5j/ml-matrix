@@ -32,7 +32,7 @@ class RowPartitionedMatrix(
     val dims = rdd.map { lm =>
       (lm.mat.rows.toLong, lm.mat.cols.toLong)
     }.reduce { case(a, b) =>
-      (a._1 + b._1, a._2)
+      (a._1, a._2 + b._2)
     }
     dims
   }
@@ -188,7 +188,7 @@ class RowPartitionedMatrix(
   // Make this more efficient
   override def collect(): DenseMatrix[Double] = {
     val parts = rdd.map(x => x.mat).collect()
-    parts.reduceLeftOption((a,b) => DenseMatrix.vertcat(a, b)).getOrElse(new DenseMatrix[Double](0, 0))
+    parts.reduceLeftOption((a,b) => DenseMatrix.horzcat(a, b)).getOrElse(new DenseMatrix[Double](0, 0))
   }
 
   def qrR(): DenseMatrix[Double] = {
@@ -299,15 +299,15 @@ object RowPartitionedMatrix {
       numCols: Int,
       numParts: Int,
       cache: Boolean = true): RowPartitionedMatrix = {
-    val rowsPerPart = numRows / numParts
+    val colsPerPart = numCols / numParts
     val matrixParts = sc.parallelize(1 to numParts, numParts).mapPartitions { part =>
-      val data = new Array[Double](rowsPerPart * numCols)
+      val data = new Array[Double](colsPerPart * numRows)
       var i = 0
-      while (i < rowsPerPart*numCols) {
+      while (i < colsPerPart*numRows) {
         data(i) = ThreadLocalRandom.current().nextDouble()
         i = i + 1
       }
-      val mat = new DenseMatrix[Double](rowsPerPart, numCols, data)
+      val mat = new DenseMatrix[Double](numRows, colsPerPart, data)
       Iterator(mat)
     }
     if (cache) {
