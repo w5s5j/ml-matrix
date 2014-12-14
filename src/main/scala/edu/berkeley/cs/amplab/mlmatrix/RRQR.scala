@@ -19,6 +19,7 @@ class RRQR extends RowPartitionedSolver with Logging with Serializable {
     val bt = 2 * b
     matrix.cache()
     val (nRows, nCols) = matrix.getDim()
+    val calTSQR = new TSQR()
     
     // TODO: need to check each partition
     //val matrixInfo = mat.rdd.map { part =>
@@ -35,7 +36,7 @@ class RRQR extends RowPartitionedSolver with Logging with Serializable {
         part
       } else {
         // Do TSQR to get just R
-        val tmpR = new TSQR().qrR(RowPartitionedMatrix.fromArray(matrix.rdd.sparkContext.parallelize(Seq(part.mat.data), 1), Seq.fill(1)(part.mat.rows), part.mat.cols))
+        val tmpR = calTSQR.qrR(RowPartitionedMatrix.fromArray(matrix.rdd.sparkContext.parallelize(Seq(part.mat.data), 1), Seq.fill(1)(part.mat.rows), part.mat.cols))
         //val tmpR = QRUtils.qrR(part.mat)
         // pvt : pivot indices
         // Do RRQR on the R just get 
@@ -44,9 +45,7 @@ class RRQR extends RowPartitionedSolver with Logging with Serializable {
         val getPvt = qrp(tmpR).pivotIndices.take(b)
         RowPartition(getPvt.map { idx =>
           part.mat(::, idx).toDenseMatrix.t
-        }.reduceLeft { (col1, col2) =>
-          DenseMatrix.horzcat(col1, col2)
-        })
+        }.reduce(DenseMatrix.horzcat(_, _)))
       }
     }
     
@@ -80,15 +79,13 @@ class RRQR extends RowPartitionedSolver with Logging with Serializable {
           RowPartition(part)
         } else {
           // pvt : pivot indices
-          val tmpR = new TSQR().qrR(RowPartitionedMatrix.fromArray(matrix.rdd.sparkContext.parallelize(Seq(part.data), 1), Seq.fill(1)(part.rows), part.cols))
+          val tmpR = calTSQR.qrR(RowPartitionedMatrix.fromArray(matrix.rdd.sparkContext.parallelize(Seq(part.data), 1), Seq.fill(1)(part.rows), part.cols))
           //val tmpR = QRUtils.qrR(part)
           val tmpQRP = qrp(tmpR)
           val getPvt = tmpQRP.pivotIndices.take(b)
           val getCols = getPvt.map { idx =>
             part(::, idx).toDenseMatrix.t
-          }.reduceLeft { (col1, col2) =>
-            DenseMatrix.horzcat(col1, col2)
-          }
+          }.reduce(DenseMatrix.horzcat(_, _))
           RowPartition(getCols)
         }
       }
@@ -101,10 +98,7 @@ class RRQR extends RowPartitionedSolver with Logging with Serializable {
 
       println(roundN.map { part =>
         part.mat
-      }.reduce { (col1, col2) =>
-        DenseMatrix.horzcat(col1, col2)
-      })
-
+      }.reduce(DenseMatrix.horzcat(_, _)))
 
     }
 
@@ -112,9 +106,7 @@ class RRQR extends RowPartitionedSolver with Logging with Serializable {
     // return a dense matrix, vertcat all RowPartition
     roundN.map { part =>
       part.mat
-    }.reduce { (col1, col2) =>
-      DenseMatrix.horzcat(col1, col2)
-    }
+    }.reduce(DenseMatrix.horzcat(_, _))
   }
 
   def solveLeastSquaresWithManyL2(A: RowPartitionedMatrix, b: RowPartitionedMatrix,lambdas: Array[Double]): Seq[DenseMatrix[Double]] = ???
