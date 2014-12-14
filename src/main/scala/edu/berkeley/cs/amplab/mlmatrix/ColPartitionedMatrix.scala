@@ -19,6 +19,7 @@ case class ColPartitionInfo(
   blockId: Int, // BlockId goes from 0 to numBlocks
   startRow: Long) extends Serializable
 
+/** Only fix getDim, create random and collect*/
 class ColPartitionedMatrix(
   val rdd: RDD[ColPartition],
   rows: Option[Long] = None,
@@ -111,15 +112,15 @@ class ColPartitionedMatrix(
     new ColPartitionedMatrix(reducedRows, rows, Some(1))
   }
 
-  override def reduceColElements(f: (Double, Double) => Double): DistributedMatrix = {
-    val reducedColsPerPart = rdd.map { rowPart =>
-      val cols = rowPart.mat.data.grouped(rowPart.mat.rows)
-      cols.map(_.reduce(f)).toArray
-    }
-    val collapsed = reducedColsPerPart.reduce { case arrPair => arrPair.zipped.map(f) }
-    ColPartitionedMatrix.fromArray(
-      rdd.sparkContext.parallelize(Seq(collapsed), 1), Seq(1), numCols().toInt)
-  }
+  //override def reduceColElements(f: (Double, Double) => Double): DistributedMatrix = {
+    //val reducedColsPerPart = rdd.map { rowPart =>
+      //val cols = rowPart.mat.data.grouped(rowPart.mat.rows)
+      //cols.map(_.reduce(f)).toArray
+    //}
+    //val collapsed = reducedColsPerPart.reduce { case arrPair => arrPair.zipped.map(f) }
+    //ColPartitionedMatrix.fromArray(
+      //rdd.sparkContext.parallelize(Seq(collapsed), 1), Seq(1), numCols().toInt)
+  //}
 
   override def +(other: DistributedMatrix) = {
     other match {
@@ -207,71 +208,71 @@ object ColPartitionedMatrix {
     new ColPartitionedMatrix(matrixRDD.map(mat => ColPartition(mat)))
   }
 
-  def fromArray(matrixRDD: RDD[Array[Double]]): ColPartitionedMatrix = {
-    fromMatrix(arrayToMatrix(matrixRDD))
-  }
+  //def fromArray(matrixRDD: RDD[Array[Double]]): ColPartitionedMatrix = {
+    //fromMatrix(arrayToMatrix(matrixRDD))
+  //}
 
-  def fromArray(
-      matrixRDD: RDD[Array[Double]],
-      rowsPerPartition: Seq[Int],
-      cols: Int): ColPartitionedMatrix = {
-    new ColPartitionedMatrix(
-      arrayToMatrix(matrixRDD, rowsPerPartition, cols).map(mat => ColPartition(mat)),
-        Some(rowsPerPartition.sum), Some(cols))
-  }
+  //def fromArray(
+      //matrixRDD: RDD[Array[Double]],
+      //rowsPerPartition: Seq[Int],
+      //cols: Int): ColPartitionedMatrix = {
+    //new ColPartitionedMatrix(
+      //arrayToMatrix(matrixRDD, rowsPerPartition, cols).map(mat => ColPartition(mat)),
+        //Some(rowsPerPartition.sum), Some(cols))
+  //}
 
-  def arrayToMatrix(
-      matrixRDD: RDD[Array[Double]],
-      rowsPerPartition: Seq[Int],
-      cols: Int) = {
-    val rBroadcast = matrixRDD.context.broadcast(rowsPerPartition)
-    val data = matrixRDD.mapPartitionsWithIndex { case (part, iter) =>
-      val rows = rBroadcast.value(part)
-      val matData = new Array[Double](rows * cols)
-      var nRow = 0
-      while (iter.hasNext) {
-        val arr = iter.next()
-        var idx = 0
-        while (idx < arr.size) {
-          matData(nRow + idx * rows) = arr(idx)
-          idx = idx + 1
-        }
-        nRow += 1
-      }
-      Iterator(new DenseMatrix[Double](rows, cols, matData.toArray))
-    }
-    data
-  }
+  //def arrayToMatrix(
+      //matrixRDD: RDD[Array[Double]],
+      //rowsPerPartition: Seq[Int],
+      //cols: Int) = {
+    //val rBroadcast = matrixRDD.context.broadcast(rowsPerPartition)
+    //val data = matrixRDD.mapPartitionsWithIndex { case (part, iter) =>
+      //val rows = rBroadcast.value(part)
+      //val matData = new Array[Double](rows * cols)
+      //var nRow = 0
+      //while (iter.hasNext) {
+        //val arr = iter.next()
+        //var idx = 0
+        //while (idx < arr.size) {
+          //matData(nRow + idx * rows) = arr(idx)
+          //idx = idx + 1
+        //}
+        //nRow += 1
+      //}
+      //Iterator(new DenseMatrix[Double](rows, cols, matData.toArray))
+    //}
+    //data
+  //}
 
-  def arrayToMatrix(matrixRDD: RDD[Array[Double]]): RDD[DenseMatrix[Double]] = {
-    val rowsColsPerPartition = matrixRDD.mapPartitionsWithIndex { case (part, iter) =>
-      if (iter.hasNext) {
-        val nCols = iter.next().size
-        Iterator((part, 1 + iter.size, nCols))
-      } else {
-        Iterator((part, 0, 0))
-      }
-    }.collect().sortBy(x => (x._1, x._2, x._3)).map(x => (x._1, (x._2, x._3))).toMap
+  //def arrayToMatrix(matrixRDD: RDD[Array[Double]]): RDD[DenseMatrix[Double]] = {
+    //val rowsColsPerPartition = matrixRDD.mapPartitionsWithIndex { case (part, iter) =>
+      //if (iter.hasNext) {
+        //val nCols = iter.next().size
+        //Iterator((part, 1 + iter.size, nCols))
+      //} else {
+        //Iterator((part, 0, 0))
+      //}
+    //}.collect().sortBy(x => (x._1, x._2, x._3)).map(x => (x._1, (x._2, x._3))).toMap
 
-    val rBroadcast = matrixRDD.context.broadcast(rowsColsPerPartition)
+    //val rBroadcast = matrixRDD.context.broadcast(rowsColsPerPartition)
 
-    val data = matrixRDD.mapPartitionsWithIndex { case (part, iter) =>
-      val (rows, cols) = rBroadcast.value(part)
-      val matData = new Array[Double](rows * cols)
-      var nRow = 0
-      while (iter.hasNext) {
-        val arr = iter.next()
-        var idx = 0
-        while (idx < arr.size) {
-          matData(nRow + idx * rows) = arr(idx)
-          idx = idx + 1
-        }
-        nRow += 1
-      }
-      Iterator(new DenseMatrix[Double](rows, cols, matData.toArray))
-    }
-    data
-  }
+    //val data = matrixRDD.mapPartitionsWithIndex { case (part, iter) =>
+      //val (rows, cols) = rBroadcast.value(part)
+      //val matData = new Array[Double](rows * cols)
+      //var nRow = 0
+      //while (iter.hasNext) {
+        //val arr = iter.next()
+        //var idx = 0
+        //while (idx < arr.size) {
+          //matData(nRow + idx * rows) = arr(idx)
+          //idx = idx + 1
+        //}
+        //nRow += 1
+      //}
+      //Iterator(new DenseMatrix[Double](rows, cols, matData.toArray))
+    //}
+    //data
+  //}
 
   def createRandom(sc: SparkContext,
       numRows: Int,
