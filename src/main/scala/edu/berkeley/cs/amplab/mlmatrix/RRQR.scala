@@ -37,6 +37,15 @@ class RRQR extends RowPartitionedSolver with Logging with Serializable {
       } else {
         // Do TSQR to get just R
         val tmpR = calTSQR.qrR(RowPartitionedMatrix.fromArray(matrix.rdd.sparkContext.parallelize(Seq(part.mat.data), 1), Seq.fill(1)(part.mat.rows), part.mat.cols))
+        val rowsPerPart = part.mat.rows.toInt / 4
+        val prePart = Seq(part.mat(0 * rowsPerPart to 1 * rowsPerPart - 1, ::),
+                          part.mat(1 * rowsPerPart to 2 * rowsPerPart - 1, ::),
+                          part.mat(2 * rowsPerPart to 3 * rowsPerPart - 1, ::),
+                          part.mat(3 * rowsPerPart to part.mat.rows.toInt - 1, ::))
+        val sc = new SparkContext("local", "test")
+        val tmpR = new TSQR().qrR(new RowPartitionedMatrix(
+          sc.makeRDD(prePart.map(RowPartition(_)))
+        ))
         //val tmpR = QRUtils.qrR(part.mat)
         // pvt : pivot indices
         // Do RRQR on the R just get 
@@ -79,7 +88,22 @@ class RRQR extends RowPartitionedSolver with Logging with Serializable {
           RowPartition(part)
         } else {
           // pvt : pivot indices
-          val tmpR = calTSQR.qrR(RowPartitionedMatrix.fromArray(matrix.rdd.sparkContext.parallelize(Seq(part.data), 1), Seq.fill(1)(part.rows), part.cols))
+          //val tmpR = calTSQR.qrR(RowPartitionedMatrix(matrix.rdd.sparkContext.parallelize(Seq(part.data), 1), Seq.fill(1)(part.rows), part.cols))
+          val rowsPerPart = part.rows.toInt / 4
+          println(111)
+          val prePart = Seq(part(0 * rowsPerPart to 1 * rowsPerPart - 1, ::),
+                            part(1 * rowsPerPart to 2 * rowsPerPart - 1, ::),
+                            part(2 * rowsPerPart to 3 * rowsPerPart - 1, ::),
+                            part(3 * rowsPerPart to part.rows.toInt - 1, ::))
+          println(111)
+          val preComp = prePart.map(RowPartition(_))
+          println(111)
+          val sc = new SparkContext("local", "test")
+          val preRDD = sc.makeRDD(preComp)
+          //val preRDD = matrix.rdd.sparkContext.makeRDD(preComp)
+          println(111)
+          val tmpR = new TSQR().qrR(new RowPartitionedMatrix(preRDD))
+          println(111)
           //val tmpR = QRUtils.qrR(part)
           val tmpQRP = qrp(tmpR)
           val getPvt = tmpQRP.pivotIndices.take(b)
