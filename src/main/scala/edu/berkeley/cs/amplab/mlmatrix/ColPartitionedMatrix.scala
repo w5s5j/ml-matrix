@@ -44,7 +44,7 @@ class ColPartitionedMatrix(
       if (iter.isEmpty) {
         Iterator()
       } else {
-        iter.zipWithIndex.map(x => (part, x._2, x._1.mat.rows.toLong))
+        iter.zipWithIndex.map(x => (part, x._2, x._1.mat.cols.toLong))
       }
     }.collect().sortBy(x => (x._1, x._2))
 

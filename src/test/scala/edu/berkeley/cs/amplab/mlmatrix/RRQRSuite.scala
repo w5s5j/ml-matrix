@@ -15,11 +15,11 @@ class RRQRSuite extends FunSuite with LocalSparkContext {
     val localA = A.collect()
     println(localA)
     
-    val t = new RRQR().rrqr(A, 1)
+    val t = new RRQR().rrqr(A, 2)
     val tmpQRP = qrp(localA)
 
     println("t")
-    println(t)
+    t.foreach(println)
     println("localT")
     println(tmpQRP.q)
     println(tmpQRP.r)
