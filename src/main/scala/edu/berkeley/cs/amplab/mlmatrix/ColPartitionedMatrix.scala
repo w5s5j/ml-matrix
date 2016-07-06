@@ -9,6 +9,9 @@ import com.github.fommil.netlib.LAPACK.{getInstance=>lapack}
 import org.netlib.util.intW
 import org.netlib.util.doubleW
 
+import scala.util.control.Breaks._
+
+
 import org.apache.spark.{SparkContext, SparkException}
 import org.apache.spark.rdd.RDD
 
@@ -17,9 +20,9 @@ case class ColPartition(mat: DenseMatrix[Double]) extends Serializable
 case class ColPartitionInfo(
   partitionId: Int, // RDD partition this block is in
   blockId: Int, // BlockId goes from 0 to numBlocks
-  startRow: Long) extends Serializable
+  startCol: Long) extends Serializable
 
-/** Only fix getDim, create random and collect*/
+/** Only fix getDim, create random and collect, apply, calPartInfo*/
 class ColPartitionedMatrix(
   val rdd: RDD[ColPartition],
   rows: Option[Long] = None,
@@ -40,7 +43,7 @@ class ColPartitionedMatrix(
 
   private def calculatePartitionInfo() {
     // Partition information sorted by (partitionId, matrixInPartition)
-    val rowsPerPartition = rdd.mapPartitionsWithIndex { case (part, iter) =>
+    val colsPerPartition = rdd.mapPartitionsWithIndex { case (part, iter) =>
       if (iter.isEmpty) {
         Iterator()
       } else {
@@ -49,7 +52,7 @@ class ColPartitionedMatrix(
     }.collect().sortBy(x => (x._1, x._2))
 
     // TODO(shivaram): Test this and make it simpler ?
-    val blocksPerPartition = rowsPerPartition.groupBy(x => x._1).mapValues(_.length)
+    val blocksPerPartition = colsPerPartition.groupBy(x => x._1).mapValues(_.length)
 
     val partitionBlockStart = new collection.mutable.HashMap[Int, Int]
     partitionBlockStart.put(0, 0)
@@ -58,15 +61,15 @@ class ColPartitionedMatrix(
         blocksPerPartition.getOrElse(p - 1, 0) + partitionBlockStart(p - 1)
     }
 
-    val rowsWithblockIds = rowsPerPartition.map { x =>
+    val colsWithblockIds = colsPerPartition.map { x =>
       (x._1, partitionBlockStart(x._1) + x._2, x._3)
     }
 
-    val cumulativeSum = rowsWithblockIds.scanLeft(0L){ case (x1, x2) =>
+    val cumulativeSum = colsWithblockIds.scanLeft(0L){ case (x1, x2) =>
       x1 + x2._3
     }.dropRight(1)
 
-    partitionInfo_ = rowsWithblockIds.map(x => (x._1, x._2)).zip(
+    partitionInfo_ = colsWithblockIds.map(x => (x._1, x._2)).zip(
       cumulativeSum).map(x => ColPartitionInfo(x._1._1, x._1._2, x._2)).groupBy(x => x.partitionId)
   }
 
@@ -143,33 +146,66 @@ class ColPartitionedMatrix(
     }
   }
 
+  def update (rowRange: ::.type, col: Int, v: DenseVector[Double]) = {
+    if (col >= numCols()) {
+      throw new IllegalArgumentException("Col out of index")
+    }
+    val colsPerPartition = rdd.zipWithIndex.map { case (part, idx) =>
+      (idx, part.mat)
+    }
+    val blocksPerPartition = colsPerPartition.mapValues(_.cols).collect().toMap
+    val partitionBlockStart = new collection.mutable.HashMap[Long, Int]
+    partitionBlockStart.put(0, 0)
+    (1 until rdd.partitions.size).foreach { p =>
+      partitionBlockStart(p) =
+        blocksPerPartition.getOrElse(p - 1, 0) + partitionBlockStart(p - 1)
+    }
+    
+    var blockIdOfCol = 0L
+    var colInBlockId = 0
+    var pre = (0L, 0)
+    val preBlockStart = partitionBlockStart.toArray.sortBy(_._1)
+    for (item <- preBlockStart) {
+      if (col < item._2) {
+        blockIdOfCol = pre._1
+        colInBlockId = col - pre._2
+        break
+      }
+      pre = item
+    }
+    val neededSubMatrix = colsPerPartition.filter(_._1 == blockIdOfCol).map(_._2).take(1)
+    (0 to v.length - 1).foreach { i =>
+      neededSubMatrix(i, colInBlockId) = v(i)
+    }
+  }
+
   override def apply(rowRange: Range, colRange: ::.type) = {
-    this.apply(rowRange, Range(0, numCols().toInt))
+    new ColPartitionedMatrix(rdd.map { lm =>
+      ColPartition(lm.mat(rowRange, ::))
+    })
   }
 
   override def apply(rowRange: ::.type, colRange: Range) = {
-    new ColPartitionedMatrix(rdd.map { lm =>
-      ColPartition(lm.mat(::, colRange))
-    })
+    this.apply(Range(0, numRows().toInt), colRange)
   }
 
   override def apply(rowRange: Range, colRange: Range) = {
     // TODO: Make this a class member
     val partitionBroadcast = rdd.sparkContext.broadcast(getPartitionInfo)
 
-    // First filter partitions which have rows in this index, then select them
+    // First filter partitions which have cols in this index, then select them
     ColPartitionedMatrix.fromMatrix(rdd.mapPartitionsWithIndex { case (part, iter) =>
       if (partitionBroadcast.value.contains(part)) {
-        val startRows = partitionBroadcast.value(part).sortBy(x => x.blockId).map(x => x.startRow)
-        iter.zip(startRows.iterator).flatMap { case (lm, sr) =>
+        val startCols = partitionBroadcast.value(part).sortBy(x => x.blockId).map(x => x.startCol)
+        iter.zip(startCols.iterator).flatMap { case (lm, sr) =>
           // TODO: Handle Longs vs. Ints correctly here
-          val matRange = sr.toInt until (sr.toInt + lm.mat.rows)
-          if (matRange.contains(rowRange.start) || rowRange.contains(sr.toInt)) {
-            // The end row is min of number of rows in this partition
-            // and number of rows left to read
-            val start = (math.max(rowRange.start - sr, 0)).toInt
-            val end = (math.min(rowRange.end - sr, lm.mat.rows)).toInt
-            Iterator(lm.mat(start until end, colRange))
+          val matRange = sr.toInt until (sr.toInt + lm.mat.cols)
+          if (matRange.contains(colRange.start) || colRange.contains(sr.toInt)) {
+            // The end col is min of number of cols in this partition
+            // and number of cols left to read
+            val start = (math.max(colRange.start - sr, 0)).toInt
+            val end = (math.min(colRange.end - sr, lm.mat.cols)).toInt
+            Iterator(lm.mat(rowRange, start until end))
           } else {
             Iterator()
           }

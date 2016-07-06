@@ -13,10 +13,28 @@ import edu.berkeley.cs.amplab.mlmatrix.util.Utils
 
 class RRQR extends ColPartitionedSolver with Logging with Serializable {
 
+  def run(matrix: ColPartitionedMatrix): Int = {
+    matrix.cache()
+    val (nRows, nCols) = matrix.getDim()
+    val nPart = matrix.rdd.map{_ => 1}.reduce(_ + _)
+    val b = nCols / nPart
+
+    val round1Sele = rrqr(matrix, b.toInt).sorted
+    val round1Swap = round1Sele.zip(0 to round1Sele.length - 1)
+    round1Swap.foreach { swap =>
+      val tmp = matrix(::, swap._1 to swap._1).rdd.take(1).mat.toDenseVector
+      matrix(::, swap._1) = matrix(::, swap._2 to swap._2).rdd.take(1).mat.toDenseVector
+      matrix(::, swap._2) = tmp
+    }
+    println(matrix.collect)
+
+    1
+  
+  }
+
+
   // b is the number of selected col
   def rrqr(matrix: ColPartitionedMatrix, b: Int): Array[Int] = {
-    //base on the paper
-    val bt = 2 * b
     matrix.cache()
     val (nRows, nCols) = matrix.getDim()
     
